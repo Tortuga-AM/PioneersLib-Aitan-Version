@@ -1,9 +1,5 @@
 package org.team7525.subsystem.examples;
 
-import static edu.wpi.first.units.Units.Degrees;
-import static edu.wpi.first.units.Units.RPM;
-import static edu.wpi.first.units.Units.RotationsPerSecond;
-
 import edu.wpi.first.math.controller.PIDController;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.wpilibj.Encoder;
@@ -23,11 +19,13 @@ import org.team7525.subsystem.SubsystemStates;
  *
  * <p>Key patterns demonstrated:
  * <ul>
- *   <li>Define states as an enum implementing {@link SubsystemStates}</li>
+ *   <li>Define states as an enum implementing {@link SubsystemStates} – {@code getStateString()}
+ *       is provided automatically, no override needed</li>
  *   <li>Associate each enum value with a {@link SubsystemState} containing the target angle</li>
- *   <li>Register button-triggered transitions via {@code addTrigger}</li>
- *   <li>Use {@code stateInit()} for one-shot actions that happen on state entry</li>
- *   <li>Use {@code runState()} for continuous actions that repeat every loop</li>
+ *   <li>Register transitions fluently via {@link #fromState(SubsystemStates)}</li>
+ *   <li>Use {@link #addStateEntryAction(SubsystemStates, Runnable)} for per-state entry logic
+ *       instead of a switch in {@code stateInit()}</li>
+ *   <li>Use {@code runState()} for continuous hardware commands each loop cycle</li>
  * </ul>
  */
 public class ExamplePivotSubsystem extends Subsystem<ExamplePivotSubsystem.States> {
@@ -67,10 +65,7 @@ public class ExamplePivotSubsystem extends Subsystem<ExamplePivotSubsystem.State
 		/** Returns the hardware setpoints associated with this state. */
 		public abstract SubsystemState getSubsystemState();
 
-		@Override
-		public String getStateString() {
-			return this.name();
-		}
+		// getStateString() is inherited automatically from SubsystemStates (returns name())
 	}
 
 	// ── Constructor ───────────────────────────────────────────────────────────
@@ -86,16 +81,26 @@ public class ExamplePivotSubsystem extends Subsystem<ExamplePivotSubsystem.State
 		// Encoder returns degrees; convert to rotations for PID
 		pivotEncoder.setDistancePerPulse(360.0 / 2048.0);
 
-		// ── Transition triggers ────────────────────────────────────────────
-		// A button: IDLE → INTAKING; B button: INTAKING → IDLE
-		addTrigger(States.IDLE, States.INTAKING, driver.a()::getAsBoolean);
-		addTrigger(States.INTAKING, States.IDLE, driver.b()::getAsBoolean);
-
-		// Right trigger held → SCORING; releasing returns to IDLE from SCORING
+		// ── Transitions (fluent builder) ───────────────────────────────────
 		BooleanSupplier scoringHeld = () -> driver.getRightTriggerAxis() > 0.5;
-		addTrigger(States.IDLE, States.SCORING, scoringHeld);
-		addTrigger(States.INTAKING, States.SCORING, scoringHeld);
-		addTrigger(States.SCORING, States.IDLE, () -> driver.getRightTriggerAxis() <= 0.5);
+
+		fromState(States.IDLE)
+				.goTo(States.INTAKING, driver.a()::getAsBoolean)
+				.goTo(States.SCORING,  scoringHeld);
+
+		fromState(States.INTAKING)
+				.goTo(States.IDLE,    driver.b()::getAsBoolean)
+				.goTo(States.SCORING, scoringHeld);
+
+		fromState(States.SCORING)
+				.goTo(States.IDLE, () -> driver.getRightTriggerAxis() <= 0.5);
+
+		// ── Per-state entry actions ────────────────────────────────────────
+		// Reset PID every time we enter any state to avoid integral windup.
+		// addStateEntryAction is called once per state-entry; no override needed.
+		addStateEntryAction(States.IDLE,     pidController::reset);
+		addStateEntryAction(States.INTAKING, pidController::reset);
+		addStateEntryAction(States.SCORING,  pidController::reset);
 	}
 
 	// ── Subsystem loop ────────────────────────────────────────────────────────
@@ -105,16 +110,7 @@ public class ExamplePivotSubsystem extends Subsystem<ExamplePivotSubsystem.State
 		// Move the arm toward the target angle for the active state
 		double targetDegrees = getState().getSubsystemState().angularPosition().getDegrees();
 		double currentDegrees = pivotEncoder.getDistance();
-		double output = pidController.calculate(currentDegrees, targetDegrees);
-		pivotMotor.set(output);
-	}
-
-	// ── State lifecycle hooks ─────────────────────────────────────────────────
-
-	@Override
-	protected void stateInit() {
-		// Reset the PID accumulator every time we enter a new state to avoid integral windup
-		pidController.reset();
+		pivotMotor.set(pidController.calculate(currentDegrees, targetDegrees));
 	}
 
 	// ── Public helpers ────────────────────────────────────────────────────────
@@ -123,5 +119,10 @@ public class ExamplePivotSubsystem extends Subsystem<ExamplePivotSubsystem.State
 	public boolean atTargetAngle() {
 		double targetDegrees = getState().getSubsystemState().angularPosition().getDegrees();
 		return Math.abs(pivotEncoder.getDistance() - targetDegrees) < 2.0;
+	}
+
+	/** Returns {@code true} if the arm is currently in the scoring position. */
+	public boolean isScoring() {
+		return isInState(States.SCORING);
 	}
 }

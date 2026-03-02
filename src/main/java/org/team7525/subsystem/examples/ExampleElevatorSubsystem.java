@@ -6,7 +6,6 @@ import static edu.wpi.first.units.Units.MetersPerSecond;
 import edu.wpi.first.math.controller.ElevatorFeedforward;
 import edu.wpi.first.math.controller.ProfiledPIDController;
 import edu.wpi.first.math.trajectory.TrapezoidProfile;
-import edu.wpi.first.units.measure.Distance;
 import edu.wpi.first.wpilibj.Encoder;
 import edu.wpi.first.wpilibj.motorcontrol.PWMSparkMax;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
@@ -27,7 +26,10 @@ import org.team7525.subsystem.SubsystemStates;
  *   <li>Store height setpoints via {@link SubsystemState#fromElevatorStates}</li>
  *   <li>Use a profiled PID + feedforward for smooth trapezoid motion</li>
  *   <li>Use {@code addTriggerFromAny()} for a global e-stop transition</li>
- *   <li>Use {@code stateInit()} to reset the motion profile on each state change</li>
+ *   <li>Use {@link #fromState(SubsystemStates)} fluent builder to chain transitions</li>
+ *   <li>Use {@link #addTimedTrigger} for automatic safety timeout from HIGH back to BOTTOM</li>
+ *   <li>Use {@link #addTransitionCallback} to react to specific state transitions</li>
+ *   <li>Use {@link #addStateEntryAction} to reset the motion profile on state entry</li>
  * </ul>
  */
 public class ExampleElevatorSubsystem extends Subsystem<ExampleElevatorSubsystem.States> {
@@ -95,10 +97,7 @@ public class ExampleElevatorSubsystem extends Subsystem<ExampleElevatorSubsystem
 		/** Returns the hardware setpoints associated with this state. */
 		public abstract SubsystemState getSubsystemState();
 
-		@Override
-		public String getStateString() {
-			return this.name();
-		}
+		// getStateString() is inherited automatically from SubsystemStates (returns name())
 	}
 
 	// ── Constructor ───────────────────────────────────────────────────────────
@@ -116,47 +115,54 @@ public class ExampleElevatorSubsystem extends Subsystem<ExampleElevatorSubsystem
 
 		pidController.setTolerance(0.01); // 1 cm tolerance
 
-		// ── Height selection (D-pad) ───────────────────────────────────────
-		addTrigger(States.BOTTOM, States.LOW, operator.povUp()::getAsBoolean);
-		addTrigger(States.LOW, States.MID, operator.povUp()::getAsBoolean);
-		addTrigger(States.MID, States.HIGH, operator.povUp()::getAsBoolean);
-
-		addTrigger(States.HIGH, States.MID, operator.povDown()::getAsBoolean);
-		addTrigger(States.MID, States.LOW, operator.povDown()::getAsBoolean);
-		addTrigger(States.LOW, States.BOTTOM, operator.povDown()::getAsBoolean);
+		// ── Height selection (D-pad, fluent builder) ───────────────────────
+		fromState(States.BOTTOM).goTo(States.LOW,  operator.povUp()::getAsBoolean);
+		fromState(States.LOW)   .goTo(States.MID,  operator.povUp()::getAsBoolean)
+		                        .goTo(States.BOTTOM, operator.povDown()::getAsBoolean);
+		fromState(States.MID)   .goTo(States.HIGH, operator.povUp()::getAsBoolean)
+		                        .goTo(States.LOW,  operator.povDown()::getAsBoolean);
+		fromState(States.HIGH)  .goTo(States.MID,  operator.povDown()::getAsBoolean)
+		                        // Safety: automatically drop to BOTTOM after 10 s at HIGH
+		                        .afterSeconds(States.BOTTOM, 10.0);
 
 		// ── Global e-stop (back button transitions from ANY state) ─────────
-		// addTriggerFromAny ensures this fires no matter what state we're in.
 		addTriggerFromAny(States.ESTOP, operator.back()::getAsBoolean);
+
+		// ── Per-state entry actions ────────────────────────────────────────
+		// Seed the profiled PID from the current position every time we enter a height state.
+		// Use the captured enum constant `s` directly (not getState()) for clarity.
+		for (States s : new States[]{States.BOTTOM, States.LOW, States.MID, States.HIGH}) {
+			final States targetState = s;
+			addStateEntryAction(s, () -> {
+				pidController.reset(elevatorEncoder.getDistance());
+				pidController.setGoal(targetState.getSubsystemState().position().in(Meters));
+			});
+		}
+
+		// In ESTOP, immediately zero the PID so there is no residual goal if we ever recover.
+		addStateEntryAction(States.ESTOP, () -> pidController.reset(elevatorEncoder.getDistance()));
+
+		// ── Transition callbacks ───────────────────────────────────────────
+		// Log to the console whenever we perform an emergency stop.
+		addTransitionCallback(States.HIGH, States.ESTOP,
+				() -> System.out.println("[Elevator] E-stop triggered from HIGH!"));
+		addTransitionCallback(States.MID, States.ESTOP,
+				() -> System.out.println("[Elevator] E-stop triggered from MID!"));
 	}
 
 	// ── Subsystem loop ────────────────────────────────────────────────────────
 
 	@Override
 	protected void runState() {
-		if (getState() == States.ESTOP) {
+		if (isInState(States.ESTOP)) {
 			elevatorMotor.set(0.0);
 			return;
 		}
 
-		Distance targetHeight = getState().getSubsystemState().position();
 		double currentHeight = elevatorEncoder.getDistance();
-
-		double pidOutput = pidController.calculate(currentHeight, targetHeight.in(Meters));
+		double pidOutput = pidController.calculate(currentHeight);
 		double ffOutput = feedforward.calculate(pidController.getSetpoint().velocity);
 		elevatorMotor.setVoltage(pidOutput + ffOutput);
-	}
-
-	// ── State lifecycle hooks ─────────────────────────────────────────────────
-
-	@Override
-	protected void stateInit() {
-		if (getState() == States.ESTOP) return;
-
-		// Seed the profiled PID with the current position so there is no discontinuous jump
-		Distance targetHeight = getState().getSubsystemState().position();
-		pidController.reset(elevatorEncoder.getDistance());
-		pidController.setGoal(targetHeight.in(Meters));
 	}
 
 	// ── Public helpers ────────────────────────────────────────────────────────

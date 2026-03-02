@@ -7,6 +7,7 @@ import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.units.measure.AngularVelocity;
 import edu.wpi.first.wpilibj.DigitalInput;
 import edu.wpi.first.wpilibj.Encoder;
+import edu.wpi.first.wpilibj.GenericHID.RumbleType;
 import edu.wpi.first.wpilibj.motorcontrol.PWMSparkMax;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
 import org.team7525.subsystem.Subsystem;
@@ -26,9 +27,11 @@ import org.team7525.subsystem.SubsystemStates;
  *   <li>Combine pivot angle and roller speed in a single {@link SubsystemState} via
  *       {@link SubsystemState#fromOpeningIntakeStates}</li>
  *   <li>Mix driver-commanded transitions with autonomous sensor-driven transitions</li>
- *   <li>Use {@code stateExit()} to stop rollers when leaving the EJECTING state</li>
- *   <li>Use {@code addRunnableTrigger()} for side-effects that don't change state
- *       (e.g. rumble the controller when a piece is captured)</li>
+ *   <li>Use {@link #addStateExitAction(SubsystemStates, Runnable)} to clear rumble on exit</li>
+ *   <li>Use {@link #addRunnableTrigger(Runnable, java.util.function.BooleanSupplier)} for
+ *       side-effects that don't change state (e.g. rumble while holding a piece)</li>
+ *   <li>Use {@link #addTransitionCallback(SubsystemStates, SubsystemStates, Runnable)} to
+ *       react to a specific transition (INTAKING → HOLDING)</li>
  * </ul>
  */
 public class ExampleIntakeSubsystem extends Subsystem<ExampleIntakeSubsystem.States> {
@@ -46,7 +49,7 @@ public class ExampleIntakeSubsystem extends Subsystem<ExampleIntakeSubsystem.Sta
 	public enum States implements SubsystemStates {
 		/**
 		 * Intake retracted and rollers stopped – safe resting position.
-		 * Pivot: 90°, roller: 0 RPM.
+		 * Pivot: 90°, roller: 0 RPS.
 		 */
 		STOWED {
 			@Override
@@ -95,10 +98,7 @@ public class ExampleIntakeSubsystem extends Subsystem<ExampleIntakeSubsystem.Sta
 		/** Returns the hardware setpoints associated with this state. */
 		public abstract SubsystemState getSubsystemState();
 
-		@Override
-		public String getStateString() {
-			return this.name();
-		}
+		// getStateString() is inherited automatically from SubsystemStates (returns name())
 	}
 
 	// ── Constructor ───────────────────────────────────────────────────────────
@@ -115,26 +115,47 @@ public class ExampleIntakeSubsystem extends Subsystem<ExampleIntakeSubsystem.Sta
 		pivotEncoder.setDistancePerPulse(360.0 / 4096.0); // degrees per pulse
 
 		// ── Driver-commanded transitions ───────────────────────────────────
-		// Left bumper deploys the intake; releasing it (or right bumper) stows it
-		addTrigger(States.STOWED, States.INTAKING, driver.leftBumper()::getAsBoolean);
-		addTrigger(States.INTAKING, States.STOWED, () -> !driver.leftBumper().getAsBoolean());
-		addTrigger(States.HOLDING, States.STOWED, driver.rightBumper()::getAsBoolean);
+		fromState(States.STOWED)
+				.goTo(States.INTAKING, driver.leftBumper()::getAsBoolean)
+				.goTo(States.EJECTING, () -> driver.getLeftTriggerAxis() > 0.5);
 
-		// Left trigger ejects from either HOLDING or STOWED
-		addTrigger(States.HOLDING, States.EJECTING, () -> driver.getLeftTriggerAxis() > 0.5);
-		addTrigger(States.STOWED, States.EJECTING, () -> driver.getLeftTriggerAxis() > 0.5);
-		addTrigger(States.EJECTING, States.STOWED, () -> driver.getLeftTriggerAxis() <= 0.5);
+		fromState(States.INTAKING)
+				.goTo(States.STOWED, () -> !driver.leftBumper().getAsBoolean());
+
+		fromState(States.HOLDING)
+				.goTo(States.STOWED,   driver.rightBumper()::getAsBoolean)
+				.goTo(States.EJECTING, () -> driver.getLeftTriggerAxis() > 0.5);
+
+		fromState(States.EJECTING)
+				.goTo(States.STOWED, () -> driver.getLeftTriggerAxis() <= 0.5);
 
 		// ── Sensor-driven transition ───────────────────────────────────────
 		// Beam-break (active-low) fires automatically when a piece is captured
 		addTrigger(States.INTAKING, States.HOLDING, () -> !beamBreak.get());
 
-		// ── Side-effect trigger (no state change) ─────────────────────────
-		// Rumble the driver controller every loop while a piece is held.
-		// The rumble is cleared in stateExit() when leaving HOLDING.
+		// ── Per-state exit actions ─────────────────────────────────────────
+		// Reset PID to prevent windup on every state exit
+		addStateExitAction(States.STOWED,   pivotPID::reset);
+		addStateExitAction(States.INTAKING, pivotPID::reset);
+		addStateExitAction(States.HOLDING,  pivotPID::reset);
+		addStateExitAction(States.EJECTING, pivotPID::reset);
+
+		// Clear controller rumble when leaving HOLDING so it doesn't persist
+		addStateExitAction(States.HOLDING,
+				() -> driver.getHID().setRumble(RumbleType.kBothRumble, 0.0));
+
+		// ── Transition callback ────────────────────────────────────────────
+		// Log and rumble the moment a piece is captured (INTAKING → HOLDING)
+		addTransitionCallback(States.INTAKING, States.HOLDING, () -> {
+			System.out.println("[Intake] Game piece captured!");
+			driver.getHID().setRumble(RumbleType.kBothRumble, 1.0);
+		});
+
+		// ── Side-effect trigger ────────────────────────────────────────────
+		// Keep rumble active every loop while holding a piece (the exit action stops it)
 		addRunnableTrigger(
-				() -> driver.getHID().setRumble(edu.wpi.first.wpilibj.GenericHID.RumbleType.kBothRumble, 1.0),
-				() -> getState() == States.HOLDING
+				() -> driver.getHID().setRumble(RumbleType.kBothRumble, 1.0),
+				() -> isInState(States.HOLDING)
 		);
 	}
 
@@ -155,23 +176,15 @@ public class ExampleIntakeSubsystem extends Subsystem<ExampleIntakeSubsystem.Sta
 		rollerMotor.set(rollerPercent);
 	}
 
-	// ── State lifecycle hooks ─────────────────────────────────────────────────
-
-	@Override
-	protected void stateExit() {
-		// Always reset PID to avoid windup when returning from a state
-		pivotPID.reset();
-
-		// Clear controller rumble when leaving HOLDING so it doesn't persist
-		if (getState() == States.HOLDING) {
-			driver.getHID().setRumble(edu.wpi.first.wpilibj.GenericHID.RumbleType.kBothRumble, 0.0);
-		}
-	}
-
 	// ── Public helpers ────────────────────────────────────────────────────────
 
 	/** Returns {@code true} when the beam-break sensor detects a game piece. */
 	public boolean hasPiece() {
 		return !beamBreak.get();
+	}
+
+	/** Returns {@code true} if the intake is actively holding a game piece. */
+	public boolean isHolding() {
+		return isInState(States.HOLDING);
 	}
 }
