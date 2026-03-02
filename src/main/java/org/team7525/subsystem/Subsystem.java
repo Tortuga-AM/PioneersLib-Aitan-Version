@@ -15,6 +15,7 @@ import java.util.function.BooleanSupplier;
 public abstract class Subsystem<StateType extends SubsystemStates> extends SubsystemBase {
 
 	private Map<StateType, ArrayList<Trigger<StateType>>> triggerMap = new HashMap<>();
+	private List<Trigger<StateType>> globalTriggers = new ArrayList<>();
 	private List<RunnableTrigger> runnableTriggerList = new ArrayList<>();
 
 	private StateType state = null;
@@ -68,17 +69,35 @@ public abstract class Subsystem<StateType extends SubsystemStates> extends Subsy
 				.add(new Trigger<>(condition, endType));
 	}
 
+	/**
+	 * Triggers for state transitions from any state.
+	 * This trigger will be checked regardless of the current state.
+	 * @param endType The {@link StateType} to transition to
+	 * @param condition A {@link BooleanSupplier} that triggers the state transition
+	 */
+	protected void addTriggerFromAny(StateType endType, BooleanSupplier condition) {
+		globalTriggers.add(new Trigger<>(condition, endType));
+	}
+
 	protected void addRunnableTrigger(Runnable runnable, BooleanSupplier check) {
 		runnableTriggerList.add(new RunnableTrigger(check, runnable));
 	}
 
 	private void checkTriggers() {
 		List<Trigger<StateType>> triggers = triggerMap.get(state);
-		if (triggers == null) return;
+		if (triggers != null) {
+			for (var trigger : triggers) {
+				if (trigger.isTriggered()) {
+					setState(trigger.getResultState());
+					return;
+				}
+			}
+		}
 
-		for (var trigger: triggers) {
+		for (var trigger : globalTriggers) {
 			if (trigger.isTriggered()) {
 				setState(trigger.getResultState());
+				return;
 			}
 		}
 	}
@@ -104,6 +123,15 @@ public abstract class Subsystem<StateType extends SubsystemStates> extends Subsy
 
 		this.state = state;
 		stateInit();
+
+		// Consume any accumulated supplier state (e.g. button pressed while in a different
+		// state) so that stale inputs don't immediately trigger a transition out of the new state.
+		List<Trigger<StateType>> newStateTriggers = triggerMap.get(state);
+		if (newStateTriggers != null) {
+			for (var trigger : newStateTriggers) {
+				trigger.resetState();
+			}
+		}
 	}
 
 	/**
