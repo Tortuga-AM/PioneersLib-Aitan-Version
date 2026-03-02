@@ -11,15 +11,24 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
+import org.team7525.subsystem.behaviortree.BehaviorNode;
+import org.team7525.subsystem.behaviortree.SetStateNode;
 
 public abstract class Subsystem<StateType extends SubsystemStates> extends SubsystemBase {
 
-	private Map<StateType, ArrayList<Trigger<StateType>>> triggerMap = new HashMap<>();
-	private List<RunnableTrigger> runnableTriggerList = new ArrayList<>();
+	private final Map<StateType, List<Trigger<StateType>>> triggerMap = new HashMap<>();
+	private final List<Trigger<StateType>> globalTriggers = new ArrayList<>();
+	private final List<RunnableTrigger> runnableTriggerList = new ArrayList<>();
+
+	private final Map<StateType, List<Runnable>> stateEntryActions = new HashMap<>();
+	private final Map<StateType, List<Runnable>> stateExitActions = new HashMap<>();
+	private final Map<StateType, Map<StateType, List<Runnable>>> transitionCallbacks = new HashMap<>();
+
+	private BehaviorNode behaviorTree = null;
 
 	private StateType state = null;
-	private Timer stateTimer = new Timer();
-	private String subsystemName;
+	private final Timer stateTimer = new Timer();
+	private final String subsystemName;
 
 	public Subsystem(String subsystemName, StateType defaultState) {
 		if (defaultState == null) {
@@ -31,12 +40,11 @@ public abstract class Subsystem<StateType extends SubsystemStates> extends Subsy
 		stateTimer.start();
 	}
 
-	// State operation
+	// ── Periodic loop ─────────────────────────────────────────────────────────
+
 	public void periodic() {
-		// Commented out bc bad code
-		// Logger.recordOutput(subsystemName + "/state", state.getStateString());
-		// if (!DriverStation.isEnabled()) return;
-		
+		SmartDashboard.putString(subsystemName + "/State", state.getStateString());
+
 		runState();
 
 		checkTriggers();
@@ -44,72 +52,337 @@ public abstract class Subsystem<StateType extends SubsystemStates> extends Subsy
 	}
 
 	protected abstract void runState();
-	
-	/**
-	 * Called AFTER the subsystem is set to a new state.
-	 * Override to implement functionality
-	 */
-	protected void stateInit() {};
 
 	/**
-	 * Called BEFORE the subsystem is set to a new state. 
-	 * Override to implement functionality
+	 * Called AFTER the subsystem transitions into a new state.
+	 * Override to implement functionality that should happen on every state entry.
+	 *
+	 * <p>Execution order within a state transition:
+	 * <ol>
+	 *   <li>{@code stateInit()} (this override)</li>
+	 *   <li>Per-state entry actions registered via {@link #addStateEntryAction(SubsystemStates, Runnable)}</li>
+	 * </ol>
+	 * Prefer {@link #addStateEntryAction(SubsystemStates, Runnable)} for per-state
+	 * logic to avoid large switch statements.
 	 */
-	protected void stateExit() {};
+	protected void stateInit() {}
 
 	/**
-	 * Triggers for state transitions
-	 * @param startType The {@link StateType} for starting
-	 * @param endType The {@link StateType} for ending
-	 * @param condition A {@link BooleanSupplier} that triggers the state transition
+	 * Called BEFORE the subsystem transitions out of the current state.
+	 * Override to implement functionality that should happen on every state exit.
+	 *
+	 * <p>Execution order within a state transition:
+	 * <ol>
+	 *   <li>{@code stateExit()} (this override)</li>
+	 *   <li>Per-state exit actions registered via {@link #addStateExitAction(SubsystemStates, Runnable)}</li>
+	 * </ol>
+	 * Prefer {@link #addStateExitAction(SubsystemStates, Runnable)} for per-state
+	 * logic to avoid large switch statements.
+	 */
+	protected void stateExit() {}
+
+	// ── Trigger registration ──────────────────────────────────────────────────
+
+	/**
+	 * Sets a behavior tree as the state-selection mechanism for this subsystem.
+	 *
+	 * <p>When a behavior tree is installed it completely <em>replaces</em> the
+	 * trigger map: {@link #addTrigger}, {@link #addTriggerFromAny}, and
+	 * {@link #fromState} are ignored. The tree is ticked once at the start of every
+	 * {@link #periodic()} loop. Action leaf nodes created via {@link #go(SubsystemStates)}
+	 * drive state transitions by calling {@link #setState(SubsystemStates)} internally.
+	 *
+	 * <h3>Behavior tree vs. state machine — when to use each</h3>
+	 * <ul>
+	 *   <li><b>State machine</b> ({@code addTrigger}): best for simple subsystems with
+	 *       a small set of discrete hardware setpoints and well-defined one-way
+	 *       transitions (e.g. pivot: IDLE → SCORE → IDLE). Every transition is explicit
+	 *       and easy to trace in the debugger.</li>
+	 *   <li><b>Behavior tree</b> ({@code setBehaviorTree}): best for subsystems with
+	 *       many overlapping conditions, priority-based preemption (e.g. e-stop from
+	 *       <em>any</em> state), or complex conditional logic. You declare
+	 *       <em>priorities</em> rather than transitions — the tree re-selects the
+	 *       active state every loop, so a higher-priority branch preempts a lower one
+	 *       the moment its conditions become true.</li>
+	 * </ul>
+	 *
+	 * <p>All lifecycle callbacks ({@link #stateInit()}, {@link #stateExit()},
+	 * {@link #addStateEntryAction}, {@link #addStateExitAction},
+	 * {@link #addTransitionCallback}) continue to work normally with either paradigm.
+	 *
+	 * @param root the root node of the behavior tree
+	 * @see org.team7525.subsystem.behaviortree.BT
+	 * @see #go(SubsystemStates)
+	 */
+	protected void setBehaviorTree(BehaviorNode root) {
+		this.behaviorTree = root;
+	}
+
+	/**
+	 * Creates a {@link BehaviorNode} that transitions this subsystem to
+	 * {@code targetState} and returns {@code RUNNING}.
+	 *
+	 * <p>Use this as the action leaf inside a behavior tree:
+	 * <pre>{@code
+	 * BT.sequence(BT.condition(driver.a()::getAsBoolean), go(States.INTAKING))
+	 * }</pre>
+	 *
+	 * @param targetState the state to activate when this node is ticked
+	 * @return a {@link SetStateNode} for use inside {@link org.team7525.subsystem.behaviortree.BT#sequence} /
+	 *         {@link org.team7525.subsystem.behaviortree.BT#selector}
+	 */
+	protected BehaviorNode go(StateType targetState) {
+		return new SetStateNode<>(this::setState, targetState);
+	}
+
+	/**
+	 * Registers a state transition from {@code startType} to {@code endType}
+	 * whenever {@code condition} returns {@code true}.
+	 *
+	 * @param startType the state this trigger is active in
+	 * @param endType   the state to transition to when the condition fires
+	 * @param condition the condition that triggers the transition
 	 */
 	protected void addTrigger(StateType startType, StateType endType, BooleanSupplier condition) {
 		triggerMap.computeIfAbsent(startType, k -> new ArrayList<>())
 				.add(new Trigger<>(condition, endType));
 	}
 
+	/**
+	 * Registers a state transition to {@code endType} from <em>any</em> state whenever
+	 * {@code condition} returns {@code true}.
+	 *
+	 * <p>State-specific triggers are checked first; global triggers are only evaluated
+	 * when no state-specific trigger fired.
+	 *
+	 * @param endType   the state to transition to
+	 * @param condition the condition that triggers the transition
+	 */
+	protected void addTriggerFromAny(StateType endType, BooleanSupplier condition) {
+		globalTriggers.add(new Trigger<>(condition, endType));
+	}
+
+	/**
+	 * Registers an automatic transition from {@code fromState} to {@code toState} after
+	 * spending at least {@code seconds} seconds in {@code fromState}.
+	 *
+	 * @param fromState the state to auto-transition from
+	 * @param toState   the state to transition to
+	 * @param seconds   the minimum time (in seconds) to spend in {@code fromState}
+	 */
+	protected void addTimedTrigger(StateType fromState, StateType toState, double seconds) {
+		addTrigger(fromState, toState, () -> getStateTime() >= seconds);
+	}
+
+	/**
+	 * Registers a {@link Runnable} that is executed every loop while {@code check}
+	 * returns {@code true}, without causing a state transition.
+	 *
+	 * @param runnable the action to execute
+	 * @param check    the condition that gates execution
+	 */
 	protected void addRunnableTrigger(Runnable runnable, BooleanSupplier check) {
 		runnableTriggerList.add(new RunnableTrigger(check, runnable));
 	}
 
-	private void checkTriggers() {
-		List<Trigger<StateType>> triggers = triggerMap.get(state);
-		if (triggers == null) return;
+	// ── Lifecycle action registration ─────────────────────────────────────────
 
-		for (var trigger: triggers) {
+	/**
+	 * Registers an action to run every time the subsystem enters {@code state}.
+	 * Multiple actions can be registered for the same state; they run in registration order,
+	 * <em>after</em> the {@link #stateInit()} override returns.
+	 *
+	 * <p>This is the preferred alternative to overriding {@link #stateInit()} with a
+	 * switch statement.
+	 *
+	 * @param state  the state whose entry triggers the action
+	 * @param action the action to run on entry
+	 */
+	protected void addStateEntryAction(StateType state, Runnable action) {
+		stateEntryActions.computeIfAbsent(state, k -> new ArrayList<>()).add(action);
+	}
+
+	/**
+	 * Registers an action to run every time the subsystem exits {@code state}.
+	 * Multiple actions can be registered for the same state; they run in registration order,
+	 * <em>after</em> the {@link #stateExit()} override returns.
+	 *
+	 * <p>This is the preferred alternative to overriding {@link #stateExit()} with a
+	 * switch statement.
+	 *
+	 * @param state  the state whose exit triggers the action
+	 * @param action the action to run on exit
+	 */
+	protected void addStateExitAction(StateType state, Runnable action) {
+		stateExitActions.computeIfAbsent(state, k -> new ArrayList<>()).add(action);
+	}
+
+	/**
+	 * Registers a callback to run whenever the subsystem transitions specifically from
+	 * {@code fromState} to {@code toState}.
+	 *
+	 * @param fromState the source state
+	 * @param toState   the destination state
+	 * @param action    the callback to run on this specific transition
+	 */
+	protected void addTransitionCallback(StateType fromState, StateType toState, Runnable action) {
+		transitionCallbacks
+				.computeIfAbsent(fromState, k -> new HashMap<>())
+				.computeIfAbsent(toState, k -> new ArrayList<>())
+				.add(action);
+	}
+
+	// ── Fluent transition builder ─────────────────────────────────────────────
+
+	/**
+	 * Returns a {@link TransitionBuilder} for fluently registering transitions
+	 * out of {@code fromState}.
+	 *
+	 * <pre>{@code
+	 * fromState(States.IDLE)
+	 *     .goTo(States.INTAKING, driver.a()::getAsBoolean)
+	 *     .goTo(States.SCORING,  () -> driver.getRightTriggerAxis() > 0.5)
+	 *     .afterSeconds(States.IDLE, 30.0); // safety timeout back to IDLE
+	 * }</pre>
+	 *
+	 * @param fromState the state to register outgoing transitions from
+	 * @return a builder for chaining transition registrations
+	 */
+	protected TransitionBuilder fromState(StateType fromState) {
+		return new TransitionBuilder(fromState);
+	}
+
+	/**
+	 * Fluent builder returned by {@link #fromState(SubsystemStates)}.
+	 * All calls immediately register the corresponding trigger in the enclosing subsystem.
+	 */
+	public final class TransitionBuilder {
+		private final StateType builderFromState;
+
+		private TransitionBuilder(StateType fromState) {
+			this.builderFromState = fromState;
+		}
+
+		/**
+		 * Registers a transition to {@code toState} when {@code condition} is {@code true}.
+		 *
+		 * @param toState   the destination state
+		 * @param condition the BooleanSupplier condition
+		 * @return {@code this} for chaining
+		 */
+		public TransitionBuilder goTo(StateType toState, BooleanSupplier condition) {
+			addTrigger(builderFromState, toState, condition);
+			return this;
+		}
+
+		/**
+		 * Registers an automatic transition to {@code toState} after spending
+		 * {@code seconds} seconds in the source state.
+		 *
+		 * @param toState the destination state
+		 * @param seconds the time in seconds to wait before transitioning
+		 * @return {@code this} for chaining
+		 */
+		public TransitionBuilder afterSeconds(StateType toState, double seconds) {
+			addTimedTrigger(builderFromState, toState, seconds);
+			return this;
+		}
+	}
+
+	// ── State machine internals ───────────────────────────────────────────────
+
+	private void checkTriggers() {
+		// Behavior tree mode: tick the tree; SetStateNodes drive transitions internally.
+		if (behaviorTree != null) {
+			behaviorTree.tick();
+			return;
+		}
+
+		// State machine mode: check explicit trigger map then global triggers.
+		List<Trigger<StateType>> triggers = triggerMap.get(state);
+		if (triggers != null) {
+			for (var trigger : triggers) {
+				if (trigger.isTriggered()) {
+					setState(trigger.getResultState());
+					return;
+				}
+			}
+		}
+
+		for (var trigger : globalTriggers) {
 			if (trigger.isTriggered()) {
 				setState(trigger.getResultState());
+				return;
 			}
 		}
 	}
 
 	private void checkRunnableTriggers() {
-		for (var trigger: runnableTriggerList) {
+		for (var trigger : runnableTriggerList) {
 			if (trigger.isTriggered()) {
 				trigger.run();
 			}
 		}
 	}
 
-	// Other utilities
+	// ── Public API ────────────────────────────────────────────────────────────
+
+	/** Returns the current state. */
 	public StateType getState() {
 		return state;
 	}
 
-	public void setState(StateType state) {
-		if (this.state == state) return;
+	/** Returns {@code true} if the subsystem is currently in {@code queryState}. */
+	public boolean isInState(StateType queryState) {
+		return this.state == queryState;
+	}
+
+	public void setState(StateType newState) {
+		if (this.state == newState) return;
+
+		StateType previousState = this.state;
 
 		stateTimer.reset();
+
 		stateExit();
 
-		this.state = state;
+		// Per-state exit actions registered via addStateExitAction (run after the override)
+		List<Runnable> exitActions = stateExitActions.get(previousState);
+		if (exitActions != null) exitActions.forEach(Runnable::run);
+
+		// Per-transition callbacks registered via addTransitionCallback
+		Map<StateType, List<Runnable>> outgoing = transitionCallbacks.get(previousState);
+		if (outgoing != null) {
+			List<Runnable> callbacks = outgoing.get(newState);
+			if (callbacks != null) callbacks.forEach(Runnable::run);
+		}
+
+		this.state = newState;
+
 		stateInit();
+
+		// Per-state entry actions registered via addStateEntryAction
+		List<Runnable> entryActions = stateEntryActions.get(newState);
+		if (entryActions != null) entryActions.forEach(Runnable::run);
+
+		// Consume stale supplier state for the new state's triggers AND global triggers.
+		// This prevents button presses accumulated while in a different state from
+		// immediately firing a transition out of the newly-entered state.
+		List<Trigger<StateType>> newStateTriggers = triggerMap.get(newState);
+		if (newStateTriggers != null) {
+			for (var trigger : newStateTriggers) {
+				trigger.resetState();
+			}
+		}
+		for (var trigger : globalTriggers) {
+			trigger.resetState();
+		}
 	}
 
 	/**
-	 * Gets amount of time the state machine has been in the current state.
+	 * Returns how long the subsystem has been in the current state.
 	 *
-	 * @return time in seconds.
+	 * @return elapsed time in seconds
 	 */
 	protected double getStateTime() {
 		return stateTimer.get();
