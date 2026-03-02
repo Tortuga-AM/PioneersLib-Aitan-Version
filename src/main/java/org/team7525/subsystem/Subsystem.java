@@ -11,6 +11,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
+import org.team7525.subsystem.behaviortree.BehaviorNode;
+import org.team7525.subsystem.behaviortree.SetStateNode;
 
 public abstract class Subsystem<StateType extends SubsystemStates> extends SubsystemBase {
 
@@ -21,6 +23,8 @@ public abstract class Subsystem<StateType extends SubsystemStates> extends Subsy
 	private final Map<StateType, List<Runnable>> stateEntryActions = new HashMap<>();
 	private final Map<StateType, List<Runnable>> stateExitActions = new HashMap<>();
 	private final Map<StateType, Map<StateType, List<Runnable>>> transitionCallbacks = new HashMap<>();
+
+	private BehaviorNode behaviorTree = null;
 
 	private StateType state = null;
 	private final Timer stateTimer = new Timer();
@@ -78,6 +82,58 @@ public abstract class Subsystem<StateType extends SubsystemStates> extends Subsy
 	protected void stateExit() {}
 
 	// ── Trigger registration ──────────────────────────────────────────────────
+
+	/**
+	 * Sets a behavior tree as the state-selection mechanism for this subsystem.
+	 *
+	 * <p>When a behavior tree is installed it completely <em>replaces</em> the
+	 * trigger map: {@link #addTrigger}, {@link #addTriggerFromAny}, and
+	 * {@link #fromState} are ignored. The tree is ticked once at the start of every
+	 * {@link #periodic()} loop. Action leaf nodes created via {@link #go(SubsystemStates)}
+	 * drive state transitions by calling {@link #setState(SubsystemStates)} internally.
+	 *
+	 * <h3>Behavior tree vs. state machine — when to use each</h3>
+	 * <ul>
+	 *   <li><b>State machine</b> ({@code addTrigger}): best for simple subsystems with
+	 *       a small set of discrete hardware setpoints and well-defined one-way
+	 *       transitions (e.g. pivot: IDLE → SCORE → IDLE). Every transition is explicit
+	 *       and easy to trace in the debugger.</li>
+	 *   <li><b>Behavior tree</b> ({@code setBehaviorTree}): best for subsystems with
+	 *       many overlapping conditions, priority-based preemption (e.g. e-stop from
+	 *       <em>any</em> state), or complex conditional logic. You declare
+	 *       <em>priorities</em> rather than transitions — the tree re-selects the
+	 *       active state every loop, so a higher-priority branch preempts a lower one
+	 *       the moment its conditions become true.</li>
+	 * </ul>
+	 *
+	 * <p>All lifecycle callbacks ({@link #stateInit()}, {@link #stateExit()},
+	 * {@link #addStateEntryAction}, {@link #addStateExitAction},
+	 * {@link #addTransitionCallback}) continue to work normally with either paradigm.
+	 *
+	 * @param root the root node of the behavior tree
+	 * @see org.team7525.subsystem.behaviortree.BT
+	 * @see #go(SubsystemStates)
+	 */
+	protected void setBehaviorTree(BehaviorNode root) {
+		this.behaviorTree = root;
+	}
+
+	/**
+	 * Creates a {@link BehaviorNode} that transitions this subsystem to
+	 * {@code targetState} and returns {@code RUNNING}.
+	 *
+	 * <p>Use this as the action leaf inside a behavior tree:
+	 * <pre>{@code
+	 * BT.sequence(BT.condition(driver.a()::getAsBoolean), go(States.INTAKING))
+	 * }</pre>
+	 *
+	 * @param targetState the state to activate when this node is ticked
+	 * @return a {@link SetStateNode} for use inside {@link org.team7525.subsystem.behaviortree.BT#sequence} /
+	 *         {@link org.team7525.subsystem.behaviortree.BT#selector}
+	 */
+	protected BehaviorNode go(StateType targetState) {
+		return new SetStateNode<>(this::setState, targetState);
+	}
 
 	/**
 	 * Registers a state transition from {@code startType} to {@code endType}
@@ -236,6 +292,13 @@ public abstract class Subsystem<StateType extends SubsystemStates> extends Subsy
 	// ── State machine internals ───────────────────────────────────────────────
 
 	private void checkTriggers() {
+		// Behavior tree mode: tick the tree; SetStateNodes drive transitions internally.
+		if (behaviorTree != null) {
+			behaviorTree.tick();
+			return;
+		}
+
+		// State machine mode: check explicit trigger map then global triggers.
 		List<Trigger<StateType>> triggers = triggerMap.get(state);
 		if (triggers != null) {
 			for (var trigger : triggers) {
