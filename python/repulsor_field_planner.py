@@ -89,7 +89,7 @@ class PointObstacle(Obstacle):
         initial_force = Vector2.from_polar(outward_force_mag, current_position.minus(self.obstacle_location).angle())
 
         theta = goal_position.minus(current_position).angle() - current_position.minus(self.obstacle_location).angle()
-        mag = (outward_force_mag * _sign(sin(theta / 2.0))) / 2.0
+        mag = (outward_force_mag * _signum(sin(theta / 2.0))) / 2.0
 
         initial_norm = initial_force.norm()
         if initial_norm < FORCE_TOLERANCE:
@@ -115,7 +115,7 @@ class GuidedObstacle(Obstacle):
         sideways_mag = self.calculate_force_magnitude(sideways_circle.distance_to(current_position))
 
         sideways_theta = goal_position.minus(current_position).angle() - current_position.minus(sideways_circle).angle()
-        sideways_mag *= _sign(sin(sideways_theta))
+        sideways_mag *= _signum(sin(sideways_theta))
 
         sideways_angle = target_to_obstacle_angle + (pi / 2.0)
         return Vector2.from_polar(sideways_mag, sideways_angle).plus(initial_force)
@@ -237,12 +237,12 @@ class RepulsorFieldPlanner:
             constrained_step_size_m = min(constrained_step_size_m, max_speed_mps * dt_s)
 
         if constrained_step_size_m <= 0:
-            raise ValueError("step_size_m and max_speed_mps*dt_s must be > 0")
+            raise ValueError("step_size_m must be > 0 and speed-constrained step size must remain > 0")
 
         recent_goal_distances: List[float] = []
 
         for iteration in range(max_iterations):
-            displacement_to_goal = target_goal.minus(robot)
+            displacement_to_goal = robot.minus(target_goal)
             distance_to_goal = displacement_to_goal.norm()
             if distance_to_goal < constrained_step_size_m * GOAL_TOLERANCE_FACTOR:
                 trajectory.append(target_goal)
@@ -304,7 +304,7 @@ class RepulsorFieldPlanner:
         return vectors
 
 
-def _sign(value: float) -> float:
+def _signum(value: float) -> float:
     if value > 0:
         return 1.0
     if value < 0:

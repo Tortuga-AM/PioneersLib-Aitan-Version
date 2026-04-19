@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from typing import Tuple
 
 from repulsor_field_planner import (
     FIELD_LENGTH,
@@ -62,7 +63,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_planner(args: argparse.Namespace) -> tuple[RepulsorFieldPlanner, Vector2, Vector2]:
+def build_planner(args: argparse.Namespace) -> Tuple[RepulsorFieldPlanner, Vector2, Vector2]:
     start = Vector2(args.start[0], args.start[1])
     goal = Vector2(args.goal[0], args.goal[1])
 
@@ -70,16 +71,16 @@ def build_planner(args: argparse.Namespace) -> tuple[RepulsorFieldPlanner, Vecto
     planner.set_goal(goal)
 
     for x, y, radius, strength in args.point_obstacle:
-        planner.add_field_obstacle(PointObstacle(float(strength), True, float(radius), Vector2(float(x), float(y))))
+        planner.add_field_obstacle(PointObstacle(strength, True, radius, Vector2(x, y)))
 
     for x, y, radius, strength in args.guided_obstacle:
-        planner.add_field_obstacle(GuidedObstacle(float(strength), True, float(radius), Vector2(float(x), float(y))))
+        planner.add_field_obstacle(GuidedObstacle(strength, True, radius, Vector2(x, y)))
 
     for y, falloff, strength in args.h_wall:
-        planner.add_wall_obstacle(HorizontalObstacle(float(strength), True, float(y), float(falloff)))
+        planner.add_wall_obstacle(HorizontalObstacle(strength, True, y, falloff))
 
     for x, falloff, strength in args.v_wall:
-        planner.add_wall_obstacle(VerticalObstacle(float(strength), True, float(x), float(falloff)))
+        planner.add_wall_obstacle(VerticalObstacle(strength, True, x, falloff))
 
     return planner, start, goal
 
