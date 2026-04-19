@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import atan2, cos, hypot, pi, sin
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 GOAL_STRENGTH = 0.65
 FIELD_LENGTH = 16.42
@@ -11,6 +11,10 @@ EPSILON = 1e-5
 FORCE_TOLERANCE = 1e-9
 MAX_OBSTACLE_INFLUENCE_DISTANCE_M = 4.0
 GOAL_TOLERANCE_FACTOR = 1.5
+DEFAULT_DT_S = 0.02
+DEFAULT_STUCK_WINDOW = 20
+DEFAULT_STUCK_PROGRESS_FACTOR = 0.15
+DEFAULT_ESCAPE_FORCE_GAIN = 0.9
 
 
 @dataclass(frozen=True)
@@ -85,12 +89,13 @@ class PointObstacle(Obstacle):
         initial_force = Vector2.from_polar(outward_force_mag, current_position.minus(self.obstacle_location).angle())
 
         theta = goal_position.minus(current_position).angle() - current_position.minus(self.obstacle_location).angle()
-        mag = (outward_force_mag * _signum(sin(theta / 2.0))) / 2.0
+        mag = (outward_force_mag * _sign(sin(theta / 2.0))) / 2.0
 
-        if initial_force.norm() < FORCE_TOLERANCE:
+        initial_norm = initial_force.norm()
+        if initial_norm < FORCE_TOLERANCE:
             return initial_force
 
-        tangent = rotate_vector(initial_force, pi / 2.0).div(initial_force.norm()).times(mag)
+        tangent = rotate_vector(initial_force, pi / 2.0).div(initial_norm).times(mag)
         return tangent.plus(initial_force)
 
 
@@ -110,7 +115,7 @@ class GuidedObstacle(Obstacle):
         sideways_mag = self.calculate_force_magnitude(sideways_circle.distance_to(current_position))
 
         sideways_theta = goal_position.minus(current_position).angle() - current_position.minus(sideways_circle).angle()
-        sideways_mag *= _signum(sin(sideways_theta))
+        sideways_mag *= _sign(sin(sideways_theta))
 
         sideways_angle = target_to_obstacle_angle + (pi / 2.0)
         return Vector2.from_polar(sideways_mag, sideways_angle).plus(initial_force)
@@ -165,6 +170,18 @@ class RepulsorFieldPlanner:
     def set_goal(self, goal: Vector2) -> None:
         self.goal = goal
 
+    def clear_field_obstacles(self) -> None:
+        self.field_obstacles.clear()
+
+    def clear_wall_obstacles(self) -> None:
+        self.wall_obstacles.clear()
+
+    def add_field_obstacle(self, obstacle: Obstacle) -> None:
+        self.field_obstacles.append(obstacle)
+
+    def add_wall_obstacle(self, obstacle: Obstacle) -> None:
+        self.wall_obstacles.append(obstacle)
+
     def get_goal_force(self, current_location: Vector2, goal: Vector2) -> Vector2:
         displacement = goal.minus(current_location)
         displacement_norm = displacement.norm()
@@ -191,12 +208,22 @@ class RepulsorFieldPlanner:
             self.get_obstacle_force(current_location, target)
         ).plus(self.get_wall_force(current_location, target))
 
+    def _escape_force(self, goal_vector: Vector2, iteration: int, base_force: float) -> Vector2:
+        if goal_vector.norm() < FORCE_TOLERANCE:
+            return Vector2()
+        direction = goal_vector.angle() + (pi / 2.0 if iteration % 2 == 0 else -pi / 2.0)
+        return Vector2.from_polar(base_force * DEFAULT_ESCAPE_FORCE_GAIN, direction)
+
     def get_trajectory(
         self,
         current: Vector2,
         goal: Optional[Vector2] = None,
         step_size_m: float = 0.15,
         max_iterations: int = 400,
+        max_speed_mps: Optional[float] = None,
+        dt_s: float = DEFAULT_DT_S,
+        enable_escape: bool = True,
+        stuck_window: int = DEFAULT_STUCK_WINDOW,
     ) -> List[Vector2]:
         self.path_length = 0.0
         trajectory: List[Vector2] = []
@@ -205,28 +232,94 @@ class RepulsorFieldPlanner:
         if target_goal is None:
             raise ValueError("Goal must be provided or set with set_goal() before generating a trajectory")
 
-        for _ in range(max_iterations):
-            displacement_to_goal = robot.minus(target_goal)
-            if displacement_to_goal.norm() < step_size_m * GOAL_TOLERANCE_FACTOR:
+        constrained_step_size_m = step_size_m
+        if max_speed_mps is not None:
+            constrained_step_size_m = min(constrained_step_size_m, max_speed_mps * dt_s)
+
+        if constrained_step_size_m <= 0:
+            raise ValueError("step_size_m and max_speed_mps*dt_s must be > 0")
+
+        recent_goal_distances: List[float] = []
+
+        for iteration in range(max_iterations):
+            displacement_to_goal = target_goal.minus(robot)
+            distance_to_goal = displacement_to_goal.norm()
+            if distance_to_goal < constrained_step_size_m * GOAL_TOLERANCE_FACTOR:
                 trajectory.append(target_goal)
                 break
 
             net_force = self.get_force(robot, target_goal)
-            if net_force.norm() == 0.0:
-                break
+            net_force_norm = net_force.norm()
+            if net_force_norm < FORCE_TOLERANCE:
+                if not enable_escape:
+                    break
+                net_force = self._escape_force(displacement_to_goal, iteration, GOAL_STRENGTH)
+            else:
+                recent_goal_distances.append(distance_to_goal)
+                if len(recent_goal_distances) > stuck_window:
+                    recent_goal_distances.pop(0)
+                if enable_escape and len(recent_goal_distances) == stuck_window:
+                    progress = recent_goal_distances[0] - recent_goal_distances[-1]
+                    minimum_progress = constrained_step_size_m * DEFAULT_STUCK_PROGRESS_FACTOR
+                    if progress < minimum_progress:
+                        net_force = net_force.plus(self._escape_force(displacement_to_goal, iteration, net_force_norm))
+                        recent_goal_distances.clear()
 
-            step = Vector2.from_polar(step_size_m, net_force.angle())
-            intermediate_goal = robot.plus(step)
-            trajectory.append(intermediate_goal)
-            self.path_length += step_size_m
-            robot = intermediate_goal
+            step = Vector2.from_polar(constrained_step_size_m, net_force.angle())
+            robot = robot.plus(step)
+            trajectory.append(robot)
+            self.path_length += constrained_step_size_m
 
         return trajectory
 
+    def sample_vector_field(
+        self,
+        goal: Optional[Vector2] = None,
+        x_samples: int = 41,
+        y_samples: int = 21,
+        normalize: bool = True,
+        max_vector_length: float = 0.35,
+    ) -> List[Tuple[float, float, float, float]]:
+        target_goal = goal if goal is not None else self.goal
+        if target_goal is None:
+            raise ValueError("Goal must be provided or set with set_goal() before sampling field")
 
-def _signum(value: float) -> float:
+        if x_samples < 2 or y_samples < 2:
+            raise ValueError("x_samples and y_samples must each be >= 2")
+
+        vectors: List[Tuple[float, float, float, float]] = []
+        for x_idx in range(x_samples):
+            x = (x_idx * FIELD_LENGTH) / (x_samples - 1)
+            for y_idx in range(y_samples):
+                y = (y_idx * FIELD_WIDTH) / (y_samples - 1)
+                force = self.get_force(Vector2(x, y), target_goal)
+                fx = force.x
+                fy = force.y
+                force_norm = hypot(fx, fy)
+                if normalize and force_norm > FORCE_TOLERANCE:
+                    scale = max_vector_length / force_norm
+                    fx *= scale
+                    fy *= scale
+                vectors.append((x, y, fx, fy))
+        return vectors
+
+
+def _sign(value: float) -> float:
     if value > 0:
         return 1.0
     if value < 0:
         return -1.0
     return 0.0
+
+
+def obstacles_as_sequences(obstacles: Sequence[Obstacle]) -> Tuple[List[Tuple[float, float, float]], List[Tuple[str, float, float, float, bool]]]:
+    circles: List[Tuple[float, float, float]] = []
+    walls: List[Tuple[str, float, float, float, bool]] = []
+    for obstacle in obstacles:
+        if isinstance(obstacle, (PointObstacle, GuidedObstacle)):
+            circles.append((obstacle.obstacle_location.x, obstacle.obstacle_location.y, obstacle.obstacle_radius))
+        elif isinstance(obstacle, HorizontalObstacle):
+            walls.append(("h", obstacle.y, obstacle.falloff, obstacle.strength, obstacle.should_repel))
+        elif isinstance(obstacle, VerticalObstacle):
+            walls.append(("v", obstacle.x, obstacle.falloff, obstacle.strength, obstacle.should_repel))
+    return circles, walls
