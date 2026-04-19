@@ -188,3 +188,7 @@ compile_commands.json
 
 # Eclipse generated file for annotation processors
 .factorypath
+
+### Python ###
+__pycache__/
+*.pyc
