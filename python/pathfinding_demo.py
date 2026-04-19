@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Tuple
+from typing import List, Tuple
 
 from repulsor_field_planner import (
     FIELD_LENGTH,
@@ -85,7 +85,7 @@ def build_planner(args: argparse.Namespace) -> Tuple[RepulsorFieldPlanner, Vecto
     return planner, start, goal
 
 
-def visualize(planner: RepulsorFieldPlanner, start: Vector2, goal: Vector2, path: list[Vector2], args: argparse.Namespace) -> None:
+def visualize(planner: RepulsorFieldPlanner, start: Vector2, goal: Vector2, path: List[Vector2], args: argparse.Namespace) -> None:
     try:
         import matplotlib
         if args.no_show and args.save_image:
@@ -150,7 +150,7 @@ def _save_svg_visualization(
     planner: RepulsorFieldPlanner,
     start: Vector2,
     goal: Vector2,
-    path: list[Vector2],
+    path: List[Vector2],
     output_path: str,
 ) -> None:
     width_px = 1200
@@ -166,7 +166,7 @@ def _save_svg_visualization(
     all_obstacles = planner.field_obstacles + planner.wall_obstacles
     circles, walls = obstacles_as_sequences(all_obstacles)
 
-    pieces: list[str] = [
+    pieces: List[str] = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width_px}" height="{height_px}" viewBox="0 0 {width_px} {height_px}">',
         '<rect x="0" y="0" width="100%" height="100%" fill="white" />',
     ]
