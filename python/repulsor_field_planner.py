@@ -9,6 +9,8 @@ FIELD_LENGTH = 16.42
 FIELD_WIDTH = 8.16
 EPSILON = 1e-5
 FORCE_TOLERANCE = 1e-9
+MAX_OBSTACLE_INFLUENCE_DISTANCE_M = 4.0
+GOAL_TOLERANCE_FACTOR = 1.5
 
 
 @dataclass(frozen=True)
@@ -76,7 +78,7 @@ class PointObstacle(Obstacle):
 
     def get_force_at_position(self, current_position: Vector2, goal_position: Vector2) -> Vector2:
         distance = self.obstacle_location.distance_to(current_position)
-        if distance > 4:
+        if distance > MAX_OBSTACLE_INFLUENCE_DISTANCE_M:
             return Vector2()
 
         outward_force_mag = self.calculate_force_magnitude(distance - self.obstacle_radius)
@@ -204,7 +206,7 @@ class RepulsorFieldPlanner:
 
         for _ in range(max_iterations):
             error = robot.minus(target_goal)
-            if error.norm() < step_size_m * 1.5:
+            if error.norm() < step_size_m * GOAL_TOLERANCE_FACTOR:
                 trajectory.append(target_goal)
                 break
 
