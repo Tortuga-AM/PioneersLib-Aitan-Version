@@ -57,7 +57,7 @@ class Obstacle:
         self.should_repel = should_repel
 
     def get_force_at_position(self, current_position: Vector2, goal_position: Vector2) -> Vector2:
-        raise NotImplementedError
+        raise NotImplementedError("Subclasses must implement get_force_at_position")
 
     def calculate_force_magnitude(self, distance: float) -> float:
         force_mag = self.strength / (EPSILON + abs(distance * distance))
@@ -167,10 +167,11 @@ class RepulsorFieldPlanner:
 
     def get_goal_force(self, current_location: Vector2, goal: Vector2) -> Vector2:
         displacement = goal.minus(current_location)
-        if displacement.norm() == 0.0:
+        displacement_norm = displacement.norm()
+        if displacement_norm == 0.0:
             return Vector2()
 
-        magnitude = GOAL_STRENGTH * (1.0 + 1.0 / (EPSILON + displacement.norm() * displacement.norm()))
+        magnitude = GOAL_STRENGTH * (1.0 + 1.0 / (EPSILON + displacement_norm * displacement_norm))
         return Vector2.from_polar(magnitude, displacement.angle())
 
     def _sum_forces(self, current_location: Vector2, target: Vector2, obstacles: Iterable[Obstacle]) -> Vector2:
@@ -205,8 +206,8 @@ class RepulsorFieldPlanner:
             raise ValueError("Goal must be provided or set with set_goal() before generating a trajectory")
 
         for _ in range(max_iterations):
-            error = robot.minus(target_goal)
-            if error.norm() < step_size_m * GOAL_TOLERANCE_FACTOR:
+            displacement_to_goal = robot.minus(target_goal)
+            if displacement_to_goal.norm() < step_size_m * GOAL_TOLERANCE_FACTOR:
                 trajectory.append(target_goal)
                 break
 
