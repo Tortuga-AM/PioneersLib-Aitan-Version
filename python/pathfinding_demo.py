@@ -8,7 +8,7 @@ def main() -> None:
     goal = Vector2(15.0, 7.0)
     planner.set_goal(goal)
 
-    path = planner.get_trajectory(start, goal, step_size_m=0.15)
+    path = planner.get_trajectory(start, step_size_m=0.15)
 
     print(f"Computed {len(path)} path points")
     print(f"Approximate path length: {planner.path_length:.2f} m")

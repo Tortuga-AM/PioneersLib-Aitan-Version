@@ -7,6 +7,8 @@ from typing import Iterable, List, Optional
 GOAL_STRENGTH = 0.65
 FIELD_LENGTH = 16.42
 FIELD_WIDTH = 8.16
+EPSILON = 1e-5
+FORCE_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True)
@@ -56,12 +58,12 @@ class Obstacle:
         raise NotImplementedError
 
     def calculate_force_magnitude(self, distance: float) -> float:
-        force_mag = self.strength / (0.00001 + abs(distance * distance))
+        force_mag = self.strength / (EPSILON + abs(distance * distance))
         return force_mag if self.should_repel else -force_mag
 
     def calculate_force_magnitude_with_falloff(self, distance: float, falloff: float) -> float:
-        original = self.strength / (0.00001 + abs(distance * distance))
-        falloff_mag = self.strength / (0.00001 + abs(falloff * falloff))
+        original = self.strength / (EPSILON + abs(distance * distance))
+        falloff_mag = self.strength / (EPSILON + abs(falloff * falloff))
         mag = max(original - falloff_mag, 0.0)
         return mag if self.should_repel else -mag
 
@@ -83,7 +85,7 @@ class PointObstacle(Obstacle):
         theta = goal_position.minus(current_position).angle() - current_position.minus(self.obstacle_location).angle()
         mag = (outward_force_mag * _signum(sin(theta / 2.0))) / 2.0
 
-        if initial_force.norm() < 1e-9:
+        if initial_force.norm() < FORCE_TOLERANCE:
             return initial_force
 
         tangent = rotate_vector(initial_force, pi / 2.0).div(initial_force.norm()).times(mag)
@@ -155,7 +157,6 @@ class RepulsorFieldPlanner:
     ) -> None:
         self.field_obstacles = list(field_obstacles) if field_obstacles is not None else list(DEFAULT_FIELD_OBSTACLES)
         self.wall_obstacles = list(wall_obstacles) if wall_obstacles is not None else list(DEFAULT_WALLS)
-        self.all_field_obstacles: List[Obstacle] = list(DEFAULT_FIELD_OBSTACLES) + list(DEFAULT_WALLS)
         self.goal: Optional[Vector2] = None
         self.path_length = 0.0
 
@@ -167,7 +168,7 @@ class RepulsorFieldPlanner:
         if displacement.norm() == 0.0:
             return Vector2()
 
-        magnitude = GOAL_STRENGTH * (1.0 + 1.0 / (0.0001 + displacement.norm() * displacement.norm()))
+        magnitude = GOAL_STRENGTH * (1.0 + 1.0 / (EPSILON + displacement.norm() * displacement.norm()))
         return Vector2.from_polar(magnitude, displacement.angle())
 
     def _sum_forces(self, current_location: Vector2, target: Vector2, obstacles: Iterable[Obstacle]) -> Vector2:
@@ -180,7 +181,7 @@ class RepulsorFieldPlanner:
         return self._sum_forces(current_location, target, self.wall_obstacles)
 
     def get_obstacle_force(self, current_location: Vector2, target: Vector2) -> Vector2:
-        return self._sum_forces(current_location, target, self.all_field_obstacles)
+        return self._sum_forces(current_location, target, self.field_obstacles)
 
     def get_force(self, current_location: Vector2, target: Vector2) -> Vector2:
         return self.get_goal_force(current_location, target).plus(
@@ -190,21 +191,24 @@ class RepulsorFieldPlanner:
     def get_trajectory(
         self,
         current: Vector2,
-        goal: Vector2,
-        step_size_m: float,
+        goal: Optional[Vector2] = None,
+        step_size_m: float = 0.15,
         max_iterations: int = 400,
     ) -> List[Vector2]:
         self.path_length = 0.0
         trajectory: List[Vector2] = []
         robot = current
+        target_goal = goal if goal is not None else self.goal
+        if target_goal is None:
+            raise ValueError("Goal must be provided or set with set_goal() before generating a trajectory")
 
         for _ in range(max_iterations):
-            error = robot.minus(goal)
+            error = robot.minus(target_goal)
             if error.norm() < step_size_m * 1.5:
-                trajectory.append(goal)
+                trajectory.append(target_goal)
                 break
 
-            net_force = self.get_force(robot, goal)
+            net_force = self.get_force(robot, target_goal)
             if net_force.norm() == 0.0:
                 break
 
